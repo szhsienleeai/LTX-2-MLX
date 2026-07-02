@@ -228,12 +228,20 @@ class TransformerArgsPreprocessor:
         )
         return pe
 
-    def prepare(self, modality: Modality) -> TransformerArgs:
+    def prepare(
+        self,
+        modality: Modality,
+        cross_modality: Optional[Modality] = None,
+    ) -> TransformerArgs:
         """
         Prepare all inputs for transformer blocks.
 
         Args:
             modality: Input modality data.
+            cross_modality: Accepted (and ignored) for signature compatibility with
+                MultiModalTransformerArgsPreprocessor.prepare, so call sites can pass
+                both modalities polymorphically. Single-modality models have no
+                cross-attention, so this is unused here.
 
         Returns:
             TransformerArgs ready for transformer blocks.
