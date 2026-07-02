@@ -374,6 +374,14 @@ def load_transformer_weights(
             # Remove prefix
             key = pytorch_key.replace("model.diffusion_model.", "")
 
+            # FP8 quant-scale tensors are metadata, not model parameters. weight_scale
+            # is already collected into fp8_scales above (used to dequantize weights);
+            # input_scale (activation scale) isn't needed once weights are dequantized to
+            # fp16. Skip both, else model.update() rejects an unmatched "input_scale" key.
+            if key.endswith(".input_scale") or key.endswith(".weight_scale"):
+                skipped_count += 1
+                continue
+
             # Convert key
             mlx_key = convert_pytorch_key_to_mlx(key, include_audio=include_audio)
             if mlx_key is None:
