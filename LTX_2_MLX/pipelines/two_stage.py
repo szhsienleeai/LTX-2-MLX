@@ -257,8 +257,7 @@ class TwoStagePipeline:
         sigmas: mx.array,
         positive_context: mx.array,
         negative_context: mx.array,
-        video_guider: CFGGuider,
-        audio_guider: CFGGuider,
+        guider: CFGGuider,
         stepper: EulerDiffusionStep,
         guidance_rescale: float = 0.0,
         callback: Optional[Callable[[str, int, int], None]] = None,
@@ -275,15 +274,18 @@ class TwoStagePipeline:
             )
             pos_denoised = self.transformer(pos_modality)
 
-            # Run negative (unconditioned) prediction for CFG
-            if guider.enabled():
+            # Run negative (unconditioned) prediction for CFG.
+            # guider is a MultiModalGuider (see __call__): CFG-enabled check is
+            # do_unconditional_generation(), and calculate(cond, uncond, 0.0, 0.0)
+            # reduces to plain CFG (perturbed/modality passes disabled as floats).
+            if guider.do_unconditional_generation():
                 neg_modality = modality_from_state(
                     video_state, negative_context, sigma
                 )
                 neg_denoised = self.transformer(neg_modality)
 
                 # Apply CFG guidance
-                denoised = guider.guide(pos_denoised, neg_denoised)
+                denoised = guider.calculate(pos_denoised, neg_denoised, 0.0, 0.0)
 
                 # Apply guidance rescale to prevent variance explosion
                 if guidance_rescale > 0:
