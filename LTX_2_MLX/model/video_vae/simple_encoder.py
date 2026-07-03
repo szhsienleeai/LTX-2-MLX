@@ -297,11 +297,14 @@ class SimpleVideoEncoder(nn.Module):
         self.down_blocks_4 = EncoderResBlockGroup(512, num_blocks=6)
         self.down_blocks_5 = SpaceToDepthDownsample3d(512, 1024, stride=(2, 2, 2))  # compress_all_res
         self.down_blocks_6 = EncoderResBlockGroup(1024, num_blocks=2)
-        self.down_blocks_7 = SpaceToDepthDownsample3d(1024, 1024, stride=(2, 2, 2))  # compress_all_res
-        self.down_blocks_8 = EncoderResBlockGroup(1024, num_blocks=2)
+        self.down_blocks_7 = SpaceToDepthDownsample3d(1024, 2048, stride=(2, 2, 2))  # compress_all_res
+        # NOTE: block 7 is 1024->2048 (matches checkpoint conv weights, 256ch*8 after s2d, and
+        # the "1024->2048" comment at the call site). Declaring 1024 out made the residual
+        # group-mean produce 1024ch against the 2048ch main path -> broadcast crash in i2v.
+        self.down_blocks_8 = EncoderResBlockGroup(2048, num_blocks=2)  # checkpoint: 2048x2048 convs
 
         # Conv out: 1024 -> 129 (128 means + 1 uniform logvar)
-        self.conv_out = Conv3dSimple(1024, 129)
+        self.conv_out = Conv3dSimple(2048, 129)  # checkpoint: (129, 2048, 3,3,3)
 
     def __call__(
         self,
