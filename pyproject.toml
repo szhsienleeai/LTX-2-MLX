@@ -55,6 +55,9 @@ test = [
     "pytest>=7.4.0",
     "pytest-timeout>=2.1.0",
 ]
+ic-lora = [
+    "opencv-python-headless>=4.8",
+]
 
 [project.urls]
 Homepage = "https://github.com/username/LTX-2-MLX"

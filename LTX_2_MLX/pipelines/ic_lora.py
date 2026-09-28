@@ -32,8 +32,9 @@ from ..components import (
 )
 from ..conditioning.item import ConditioningItem
 from ..conditioning.keyframe import VideoConditionByKeyframeIndex
+from ..conditioning.reference import VideoConditionByReferenceLatent
 from ..conditioning.tools import VideoLatentTools
-from ..loader import LoRAConfig, fuse_lora_into_weights
+from ..loader import LoRAConfig, fuse_lora_into_weights, fuse_lora_streaming
 from ..model.transformer import LTXModel, Modality, X0Model
 from ..model.video_vae.simple_decoder import SimpleVideoDecoder, decode_latent
 from ..model.video_vae.simple_encoder import SimpleVideoEncoder
@@ -256,6 +257,11 @@ class ICLoraConfig:
     # Tiling
     tiling_config: Optional[TilingConfig] = None
 
+    # Single stage at the full output size with the IC-LoRA fused in place:
+    # no latent upsampler, no weight restore (the base weights are not kept).
+    # Used by the pixel spatial upscaler.
+    skip_stage_2: bool = False
+
     # Compute settings
     dtype: mx.Dtype = mx.float32
 
@@ -285,6 +291,10 @@ class VideoCondition:
     canny_high: int = 200
     # Whether to save the preprocessed control signal
     save_control: bool = False
+    # Target/reference spatial ratio from the IC-LoRA's metadata (pixel
+    # upscalers use 2 or 4). >1 encodes the reference at 1/factor size and
+    # scales its positions onto the target grid.
+    downscale_factor: int = 1
 
 
 def load_video_tensor(
@@ -391,21 +401,34 @@ def create_video_conditionings(
             )
             video_tensor = load_control_signal_tensor(control_signal, dtype)
         else:
-            # RAW: load video directly
+            # RAW: load video directly (at reference size for downscaled refs)
+            f = vid_cond.downscale_factor
+            if height % f or width % f:
+                raise ValueError(
+                    f"Stage size {height}x{width} must be divisible by the "
+                    f"reference downscale factor {f}"
+                )
             video_tensor = load_video_tensor(
-                vid_cond.video_path, height, width, num_frames, dtype
+                vid_cond.video_path, height // f, width // f, num_frames, dtype
             )
 
         # Encode through VAE
         encoded_video = video_encoder(video_tensor)
         mx.eval(encoded_video)
 
-        # Use keyframe conditioning to append the control signal
-        conditioning = VideoConditionByKeyframeIndex(
-            keyframes=encoded_video,
-            frame_idx=0,  # Start from frame 0
-            strength=vid_cond.strength,
-        )
+        if vid_cond.downscale_factor > 1:
+            conditioning = VideoConditionByReferenceLatent(
+                latent=encoded_video,
+                downscale_factor=vid_cond.downscale_factor,
+                strength=vid_cond.strength,
+            )
+        else:
+            # Same-size control signal: keyframe conditioning at frame 0
+            conditioning = VideoConditionByKeyframeIndex(
+                keyframes=encoded_video,
+                frame_idx=0,  # Start from frame 0
+                strength=vid_cond.strength,
+            )
         conditionings.append(conditioning)
 
     return conditionings
@@ -490,6 +513,13 @@ class ICLoraPipeline:
         # Apply fused weights to transformer (use raw velocity model)
         self._velocity_model.load_weights(list(fused_weights.items()))
         mx.eval(self._velocity_model.parameters())
+
+    def _apply_lora_in_place(self) -> None:
+        """Fuse IC-LoRA into the live weights without keeping a base copy."""
+        if not self.lora_configs:
+            return
+        fuse_lora_streaming(self._velocity_model, self.lora_configs, verbose=True)
+        self.lora_configs = []  # fused for good; _apply_lora must not fuse again
 
     def _remove_lora(self) -> None:
         """Restore original weights (remove IC-LoRA)."""
@@ -591,11 +621,15 @@ class ICLoraPipeline:
         stepper = self.diffusion_step
 
         # ====== STAGE 1: Half resolution with IC-LoRA ======
-        stage_1_height = config.height // 2
-        stage_1_width = config.width // 2
-
-        # Apply IC-LoRA to transformer
-        self._apply_lora()
+        # (single-stage mode generates at the full output size instead)
+        if config.skip_stage_2:
+            stage_1_height = config.height
+            stage_1_width = config.width
+            self._apply_lora_in_place()
+        else:
+            stage_1_height = config.height // 2
+            stage_1_width = config.width // 2
+            self._apply_lora()
 
         # Create stage 1 output shape
         stage_1_pixel_shape = VideoPixelShape(
@@ -666,6 +700,11 @@ class ICLoraPipeline:
         video_state = video_tools.unpatchify(video_state)
 
         stage_1_latent = video_state.latent
+
+        if config.skip_stage_2:
+            if config.tiling_config:
+                return decode_tiled(stage_1_latent, self.video_decoder, config.tiling_config)
+            return decode_latent(stage_1_latent, self.video_decoder)
 
         # ====== STAGE 2: Upsample and refine WITHOUT IC-LoRA ======
         # Remove IC-LoRA, restore base weights

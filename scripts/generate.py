@@ -990,6 +990,8 @@ def generate_video(
     # IC-LoRA and Keyframe Interpolation
     keyframes: list = None,
     ic_lora_weights: str = None,
+    ic_lora_downscale: int = 0,
+    skip_stage_2: bool = False,
     # Audio guidance (LTX-2.3 reference defaults)
     audio_cfg_scale: float = None,  # None = use 7.0 default
     rescale_scale: float = None,    # None = use 0.7 default
@@ -1460,20 +1462,35 @@ def generate_video(
         else:
             print("  Skipping weights load (placeholder)")
 
-        # Load spatial upscaler
-        print("[3.6/5] Loading spatial upscaler...")
-        spatial_upscaler = SpatialUpscaler()
-        upscaler_path = spatial_upscaler_weights or "weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors"
-        if os.path.exists(upscaler_path):
-            load_spatial_upscaler_weights(spatial_upscaler, upscaler_path)
+        if skip_stage_2:
+            # Single stage: no latent upsampler, and no base-weight copy (the
+            # IC-LoRA is fused in place; keeping a reference would pin a second
+            # copy of the 22B weights in memory).
+            print("[3.6/5] Single-stage mode: skipping spatial upscaler")
+            spatial_upscaler = None
+            base_weights = {}
         else:
-            print(f"  Warning: Spatial upscaler weights not found at {upscaler_path}")
+            # Load spatial upscaler
+            print("[3.6/5] Loading spatial upscaler...")
+            spatial_upscaler = SpatialUpscaler()
+            upscaler_path = spatial_upscaler_weights or "weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors"
+            if os.path.exists(upscaler_path):
+                load_spatial_upscaler_weights(spatial_upscaler, upscaler_path)
+            else:
+                print(f"  Warning: Spatial upscaler weights not found at {upscaler_path}")
 
-        # Get base transformer weights for restoration after stage 1
-        if hasattr(model, 'velocity_model'):
-            base_weights = dict(tree_flatten(model.velocity_model.parameters()))
-        else:
-            base_weights = dict(tree_flatten(model.parameters()))
+            # Get base transformer weights for restoration after stage 1
+            if hasattr(model, 'velocity_model'):
+                base_weights = dict(tree_flatten(model.velocity_model.parameters()))
+            else:
+                base_weights = dict(tree_flatten(model.parameters()))
+
+        ref_downscale = ic_lora_downscale
+        if ic_lora_weights and ref_downscale == 0:
+            from LTX_2_MLX.loader import read_lora_metadata
+            ref_downscale = int(read_lora_metadata(ic_lora_weights).get("reference_downscale_factor", 1))
+        ref_downscale = max(ref_downscale, 1)
+        print(f"  Reference downscale factor: {ref_downscale}")
 
         # Prepare LoRA configs if provided
         lora_configs = None
@@ -1501,6 +1518,7 @@ def generate_video(
             fps=24.0,
             stage_1_steps=num_steps,
             dtype=compute_dtype,
+            skip_stage_2=skip_stage_2,
         )
 
         # Create video conditioning if control video provided
@@ -1514,6 +1532,7 @@ def generate_video(
                 canny_low=canny_low,
                 canny_high=canny_high,
                 save_control=save_control,
+                downscale_factor=ref_downscale,
             )
             video_conditioning = [video_cond]
 
@@ -2618,6 +2637,19 @@ def main():
         help="Path to IC-LoRA weights for video-to-video generation"
     )
     parser.add_argument(
+        "--ic-lora-downscale",
+        type=int,
+        default=0,
+        help="Target/reference spatial ratio for the IC-LoRA (0 = read "
+             "reference_downscale_factor from the LoRA metadata, default 1)"
+    )
+    parser.add_argument(
+        "--skip-stage-2",
+        action="store_true",
+        help="IC-LoRA single stage at the full --height/--width, IC-LoRA fused in "
+             "place, no latent upsampler (pixel spatial upscaler workflow)"
+    )
+    parser.add_argument(
         "--early-layers-only",
         action="store_true",
         help="[EXPERIMENTAL] Use only Layer 0 (input embeddings) from Gemma. "
@@ -2721,6 +2753,8 @@ def main():
         # IC-LoRA and Keyframe Interpolation
         keyframes=args.keyframe,
         ic_lora_weights=args.ic_lora_weights,
+        ic_lora_downscale=args.ic_lora_downscale,
+        skip_stage_2=args.skip_stage_2,
     )
 
 

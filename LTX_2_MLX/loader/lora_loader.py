@@ -44,9 +44,27 @@ def load_lora_weights(path: str) -> Dict[str, mx.array]:
             elif tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
                 tensor = tensor.to(torch.float32)
 
-            weights[key] = mx.array(tensor.numpy())
+            weights[normalize_lora_key(key)] = mx.array(tensor.numpy())
 
     return weights
+
+
+def normalize_lora_key(key: str) -> str:
+    """
+    Map a PyTorch-named LoRA key onto this port's transformer parameter names.
+
+    The weight converter renames ``to_out.0`` -> ``to_out``, ``ff.net.0.proj``
+    -> ``ff.project_in.proj`` and ``ff.net.2`` -> ``ff.project_out``; LoRA
+    files keep the PyTorch names, so without the same renames only q/k/v
+    match and the output/feed-forward deltas are dropped.
+    """
+    import re
+
+    key = re.sub(r"^(model\.)?diffusion_model\.", "", key)
+    key = re.sub(r"\.to_out\.0\.", ".to_out.", key)
+    key = re.sub(r"\.ff\.net\.0\.proj\.", ".ff.project_in.proj.", key)
+    key = re.sub(r"\.ff\.net\.2\.", ".ff.project_out.", key)
+    return key
 
 
 def find_lora_keys_for_weight(
@@ -192,6 +210,86 @@ def fuse_lora_into_weights(
         print(f"Fused LoRA into {fused_count} weights, skipped {skipped_count}")
 
     return fused_weights
+
+
+def read_lora_metadata(path: str) -> Dict[str, str]:
+    """Read the safetensors header ``__metadata__`` block without loading tensors."""
+    import json
+    import struct
+
+    with open(path, "rb") as f:
+        (header_len,) = struct.unpack("<Q", f.read(8))
+        header = json.loads(f.read(header_len))
+    return header.get("__metadata__", {}) or {}
+
+
+def fuse_lora_streaming(
+    model,
+    lora_configs: List[LoRAConfig],
+    verbose: bool = True,
+) -> int:
+    """
+    Fuse LoRA deltas into a model in place, one weight at a time.
+
+    ``fuse_lora_into_weights`` materializes a float32 copy of every weight,
+    which for a 22B transformer is ~88GB; this keeps the peak overhead to a
+    single layer. There is no way back to the base weights afterwards, so use
+    it only when the unfused model is not needed again in this process.
+
+    Returns:
+        Number of weights that received a delta. Raises if none matched, since
+        a LoRA whose keys map to nothing would otherwise run as the base model.
+    """
+    from mlx.utils import tree_flatten
+
+    all_loras = []
+    for config in lora_configs:
+        if verbose:
+            print(f"Loading LoRA: {config.path} (strength={config.strength})")
+        all_loras.append((load_lora_weights(config.path), config.strength))
+
+    fused_count = 0
+    used = set()
+    for key, base_weight in tree_flatten(model.parameters()):
+        if not mx.issubdtype(base_weight.dtype, mx.floating):
+            continue
+        delta_sum = None
+        for lora_weights, strength in all_loras:
+            key_a, key_b = find_lora_keys_for_weight(lora_weights, key)
+            if key_a is None or key_b is None:
+                continue
+            delta = compute_lora_delta(lora_weights, key_a, key_b, strength)
+            if delta.shape != base_weight.shape:
+                if verbose:
+                    print(f"  Shape mismatch for {key}: base={base_weight.shape}, delta={delta.shape}")
+                continue
+            used.add((id(lora_weights), key_a))
+            delta_sum = delta if delta_sum is None else delta_sum + delta
+        if delta_sum is None:
+            continue
+        fused = (base_weight.astype(mx.float32) + delta_sum.astype(mx.float32)).astype(base_weight.dtype)
+        model.load_weights([(key, fused)], strict=False)
+        mx.eval(fused)
+        fused_count += 1
+
+    if verbose:
+        print(f"Fused LoRA in place into {fused_count} weights")
+    if fused_count == 0:
+        raise RuntimeError(
+            "LoRA matched no model weights - key naming mismatch; refusing to run "
+            "the base model under the LoRA's name"
+        )
+    unused = [
+        k for lora_weights, _ in all_loras for k in lora_weights
+        if (k.endswith(".lora_A.weight") or k.endswith(".lora_down.weight"))
+        and (id(lora_weights), k) not in used
+    ]
+    if unused:
+        raise RuntimeError(
+            f"{len(unused)} LoRA modules matched no model weight (e.g. {unused[:3]}); "
+            "a partially applied LoRA runs silently degraded"
+        )
+    return fused_count
 
 
 def apply_lora_to_model(
