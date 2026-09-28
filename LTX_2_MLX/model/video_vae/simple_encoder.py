@@ -423,6 +423,22 @@ def load_vae_encoder_weights(encoder: SimpleVideoEncoder, weights_path: str) -> 
     loaded_count = 0
 
     with safe_open(weights_path, framework="pt") as f:
+        # Blocks 7/8 and conv_out are 2048 wide in the LTX-2 VAE but 1024 wide in
+        # LTX-2.3's. The loops below assign tensors without shape checks, so a
+        # mismatched declaration loads fine and then breaks the space-to-depth
+        # residual at encode time. Size these three from the checkpoint.
+        key7 = "vae.encoder.down_blocks.7.conv.conv.weight"
+        if key7 in f.keys():
+            stride = encoder.down_blocks_7.stride
+            width = f.get_slice(key7).get_shape()[0] * stride[0] * stride[1] * stride[2]
+            if width != encoder.down_blocks_7.out_channels:
+                print(f"  VAE encoder tail width {width} (checkpoint), rebuilding blocks 7/8 and conv_out")
+                encoder.down_blocks_7 = SpaceToDepthDownsample3d(
+                    encoder.down_blocks_7.in_channels, width, stride=stride
+                )
+                encoder.down_blocks_8 = EncoderResBlockGroup(width, num_blocks=2)
+                encoder.conv_out = Conv3dSimple(width, 129)
+
         # Load per-channel statistics
         for stat_key in ["mean-of-means", "std-of-means", "mean-of-stds", "mean-of-stds-over-std-of-means", "channel"]:
             pt_key = f"vae.per_channel_statistics.{stat_key}"
