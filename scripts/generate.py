@@ -1604,13 +1604,15 @@ def generate_video(
             print("  Skipping weights load (placeholder)")
 
         # Load spatial upscaler for two-stage
-        print("[3.6/5] Loading spatial upscaler...")
-        spatial_upscaler = SpatialUpscaler()
-        upscaler_path = spatial_upscaler_weights or "weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors"
-        if os.path.exists(upscaler_path):
-            load_spatial_upscaler_weights(spatial_upscaler, upscaler_path)
-        else:
-            print(f"  Warning: Spatial upscaler weights not found at {upscaler_path}")
+        spatial_upscaler = None
+        if not skip_stage_2:
+            print("[3.6/5] Loading spatial upscaler...")
+            spatial_upscaler = SpatialUpscaler()
+            upscaler_path = spatial_upscaler_weights or "weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors"
+            if os.path.exists(upscaler_path):
+                load_spatial_upscaler_weights(spatial_upscaler, upscaler_path)
+            else:
+                print(f"  Warning: Spatial upscaler weights not found at {upscaler_path}")
 
         # Create keyframe interpolation pipeline
         print("\n[4/5] Creating keyframe interpolation pipeline...")
@@ -1631,6 +1633,10 @@ def generate_video(
             num_inference_steps=num_steps,
             cfg_scale=cfg_scale,
             dtype=compute_dtype,
+            # --skip-stage-2: denoise at full size in one stage. Needed on LTX-2.3:
+            # stage 2 upsamples latents with the LTX-2 spatial upscaler, which was
+            # trained on the 19B VAE's latent space, not 2.3's.
+            use_two_stage=not skip_stage_2,
         )
 
         # Run pipeline
