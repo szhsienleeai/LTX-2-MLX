@@ -3,6 +3,8 @@
 from typing import Tuple
 
 import mlx.core as mx
+
+from .safe_conv import conv2d_batched
 import mlx.nn as nn
 
 from .ops import patchify, PerChannelStatistics
@@ -99,7 +101,7 @@ class Conv3dSimple(nn.Module):
             x_2d = x_2d.transpose(0, 2, 3, 1)  # (B*T_out, H, W, C)
 
             # Apply 2D spatial convolution
-            conv_out = mx.conv2d(x_2d, w_slice, padding=0)  # (B*T_out, H_out, W_out, C_out)
+            conv_out = conv2d_batched(x_2d, w_slice, padding=0)  # (B*T_out, H_out, W_out, C_out)
 
             # Reshape back: (B*T_out, H_out, W_out, C_out) -> (B, C_out, T_out, H_out, W_out)
             _, _, _, c_out = conv_out.shape

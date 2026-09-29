@@ -119,3 +119,14 @@ def test_streaming_fuse_refuses_partial_lora(tmp_path):
     }, {})
     with pytest.raises(RuntimeError, match="matched no model weight"):
         fuse_lora_streaming(_Tiny(), [LoRAConfig(path=str(lora))], verbose=False)
+
+
+def test_conv2d_batched_matches_single_call(monkeypatch):
+    import LTX_2_MLX.model.video_vae.safe_conv as sc
+    x = mx.random.normal((7, 12, 10, 8))
+    w = mx.random.normal((5, 3, 3, 8))
+    ref = mx.conv2d(x, w)
+    monkeypatch.setattr(sc, "MAX_CONV2D_INPUT_ELEMS", 12 * 10 * 8 * 2)  # force 2-item chunks
+    out = sc.conv2d_batched(x, w)
+    assert out.shape == ref.shape
+    assert np.allclose(np.array(out), np.array(ref), atol=1e-4)
