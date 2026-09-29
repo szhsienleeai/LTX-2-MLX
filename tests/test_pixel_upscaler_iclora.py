@@ -129,4 +129,6 @@ def test_conv2d_batched_matches_single_call(monkeypatch):
     monkeypatch.setattr(sc, "MAX_CONV2D_INPUT_ELEMS", 12 * 10 * 8 * 2)  # force 2-item chunks
     out = sc.conv2d_batched(x, w)
     assert out.shape == ref.shape
-    assert np.allclose(np.array(out), np.array(ref), atol=1e-4)
+    # Metal fp32 conv picks different kernels per batch size (~1e-3 relative);
+    # the miscompute this guards against is off by ~9 absolute
+    assert np.allclose(np.array(out), np.array(ref), rtol=5e-3, atol=5e-2)
