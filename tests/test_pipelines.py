@@ -87,7 +87,7 @@ class TestDistilledConfig:
         assert config.width == 768
         assert config.num_frames == 97
         assert config.seed == 42
-        assert config.fps == 24.0
+        assert config.fps == 25.0
 
     def test_invalid_frame_count_raises(self):
         """Test invalid frame counts raise ValueError."""
