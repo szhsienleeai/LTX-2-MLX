@@ -4,8 +4,9 @@ import mlx.core as mx
 
 # mlx 0.30.1: mx.conv2d returns wrong values (max abs err ~9 on unit-scale
 # data) once the input passes ~1.5e8 elements — batch 31 of (146, 258, 128)
-# is exact, batch 33 is not. Conv2d is independent per batch entry, so
-# splitting the batch is exact; 2**26 leaves >2x margin under the observed edge.
+# is exact, batch 33 is not. Gone in mlx 0.32.4 (batch 64 exact; the 41-frame
+# 1024x576 VAE encode matches without chunking), which pyproject now requires.
+# Kept because chunking along the batch is exact and costs nothing.
 MAX_CONV2D_INPUT_ELEMS = 2**26
 
 
